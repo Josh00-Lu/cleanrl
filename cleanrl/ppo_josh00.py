@@ -9,8 +9,10 @@ clip_coef = 0.2 ## epsilon for PPO
 entropy_coef = 0.01
 max_grad_norm = 0.5
 
-learning_rate = 2.5e-4
+learning_rate = 1e-2
 
+# trick9: Adam epsilon
+Adam_eps = 1e-5
 
 import gymnasium as gym
 import torch
@@ -32,38 +34,35 @@ envs = gym.vector.SyncVectorEnv(
     [lambda: make_env("CartPole-v1", i, True, "Demo") for i in range(num_env)],
 )
 
+# trick8: Orthogonal Initialization
+def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
+    torch.nn.init.orthogonal_(layer.weight, std)
+    torch.nn.init.constant_(layer.bias, bias_const)
+    return layer
+
 class ActorCritic(nn.Module):
     def __init__(self, envs) -> None:
         super().__init__()
-        # self.backbone = nn.Sequential(
-        #     nn.Linear(np.prod(envs.single_observation_space.shape), 64),
-        #     nn.ReLU(),
-        #     nn.Linear(64, 64),
-        #     nn.ReLU()
-        # )
         self.critic = nn.Sequential(
-            nn.Linear(np.prod(envs.single_observation_space.shape), 64),
+            layer_init(nn.Linear(np.prod(envs.single_observation_space.shape), 64)),
             nn.ReLU(),
-            nn.Linear(64, 64),
+            layer_init(nn.Linear(64, 64)),
             nn.ReLU(),
-            nn.Linear(64, 1)
+            layer_init(nn.Linear(64, 1))
         )
         self.policy = nn.Sequential(
-            nn.Linear(np.prod(envs.single_observation_space.shape), 64),
+            layer_init(nn.Linear(np.prod(envs.single_observation_space.shape), 64)),
             nn.ReLU(),
-            nn.Linear(64, 64),
+            layer_init(nn.Linear(64, 64)),
             nn.ReLU(),
-            nn.Linear(64, envs.single_action_space.n)
+            layer_init(nn.Linear(64, envs.single_action_space.n))
         )
     
     def forward(self, obs, action=None):
-        ## 主干网络输出obs特征
-        # middle_output = self.backbone(obs)
-        middle_output = obs
         ## 值函数
-        value = self.critic(middle_output)
+        value = self.critic(obs)
         ## 输出概率
-        logits = self.policy(middle_output)
+        logits = self.policy(obs)
         
         ## 从Policy中进行动作采样
         props = Categorical(logits=logits)
@@ -89,7 +88,7 @@ state, _ = envs.reset(seed=0)
 state = torch.Tensor(state)
 
 ## 定义优化器
-optimizer = opt.Adam(Agent.parameters(), lr=learning_rate)
+optimizer = opt.Adam(Agent.parameters(), lr=learning_rate, eps=Adam_eps)
 
 for iteration in range(num_iterations//batch_size//num_env):
     for step in range(enroll_length):
@@ -134,6 +133,9 @@ for iteration in range(num_iterations//batch_size//num_env):
     b_TD_targets = TD_targets.view(-1)
     b_values = values.view(-1)
     
+    ## trick1: batch norm for advantage
+    b_advantages_norm = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
+    
     b_index = np.arange(enroll_length * num_env)
     
     for epoch in range(num_epoches): 
@@ -143,14 +145,11 @@ for iteration in range(num_iterations//batch_size//num_env):
             b_range = b_index[start:end]
             
             ## policy loss
-            ## trick1: batch norm for advatage
-            meanb_advantages = (b_advantages[b_range] - b_advantages[b_range].mean()) / (b_advantages[b_range].std() + 1e-8)
-            
             value, _, current_log_prop, entropy = Agent(b_states[b_range], b_actions[b_range])
             ratio = torch.exp(current_log_prop - b_log_props[b_range]) ## pi_new / pi_old
             
-            pg_loss1 = ratio * meanb_advantages
-            pg_loss2 = torch.clamp(ratio, 1 - clip_coef, 1 + clip_coef) * meanb_advantages
+            pg_loss1 = ratio * b_advantages_norm[b_range]
+            pg_loss2 = torch.clamp(ratio, 1 - clip_coef, 1 + clip_coef) * b_advantages_norm[b_range]
             pg_loss = -torch.min(pg_loss1, pg_loss2).mean()
             
             ## value loss
@@ -159,7 +158,7 @@ for iteration in range(num_iterations//batch_size//num_env):
             value_loss2 = (torch.clamp(value, b_values[b_range] - clip_coef, b_values[b_range] + clip_coef) - b_TD_targets[b_range]) ** 2
             value_loss = torch.max(value_loss1, value_loss2).mean()
             
-            ## entropy loss
+            ## trick5: entropy loss
             entropy_loss = entropy.mean()
             
             ## total loss
@@ -167,6 +166,7 @@ for iteration in range(num_iterations//batch_size//num_env):
                         
             optimizer.zero_grad()
             loss.backward()
+            # trick 7: gradient clip
             nn.utils.clip_grad_norm_(Agent.parameters(), max_grad_norm)
             optimizer.step()
         
