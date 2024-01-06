@@ -1,3 +1,12 @@
+'''
+trick1: batch norm for advantage
+trick2: value function clipping
+trick3: entropy loss
+trick4: gradient clip
+trick5: orthogonal Initialization
+trick6: trick6: Adam epsilon
+'''
+
 num_iterations = int(5e5) ## 总迭代次数
 enroll_length = 128 ## 环境交互步数
 num_env = 4 ## 环境个数
@@ -11,7 +20,7 @@ max_grad_norm = 0.5
 
 learning_rate = 1e-2
 
-# trick9: Adam epsilon
+# trick6: Adam epsilon
 Adam_eps = 1e-5
 
 import gymnasium as gym
@@ -34,7 +43,7 @@ envs = gym.vector.SyncVectorEnv(
     [lambda: make_env("CartPole-v1", i, True, "Demo") for i in range(num_env)],
 )
 
-# trick8: Orthogonal Initialization
+# trick5: Orthogonal Initialization
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
@@ -153,12 +162,12 @@ for iteration in range(num_iterations//batch_size//num_env):
             pg_loss = -torch.min(pg_loss1, pg_loss2).mean()
             
             ## value loss
-            ## trick1: value function clipping
+            ## trick2: value function clipping
             value_loss1 = (value - b_TD_targets[b_range]) ** 2
             value_loss2 = (torch.clamp(value, b_values[b_range] - clip_coef, b_values[b_range] + clip_coef) - b_TD_targets[b_range]) ** 2
             value_loss = torch.max(value_loss1, value_loss2).mean()
             
-            ## trick5: entropy loss
+            ## trick3: entropy loss
             entropy_loss = entropy.mean()
             
             ## total loss
@@ -166,7 +175,7 @@ for iteration in range(num_iterations//batch_size//num_env):
                         
             optimizer.zero_grad()
             loss.backward()
-            # trick 7: gradient clip
+            # trick 4: gradient clip
             nn.utils.clip_grad_norm_(Agent.parameters(), max_grad_norm)
             optimizer.step()
         
