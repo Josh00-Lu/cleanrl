@@ -98,18 +98,18 @@ class Agent(nn.Module):
     def __init__(self, envs):
         super().__init__()
         self.critic = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 1), std=1.0),
+            nn.Linear(np.prod(envs.single_observation_space.shape), 64),
+            nn.ReLU(),
+            nn.Linear(64, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1)
         )
         self.actor = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, envs.single_action_space.n), std=0.01),
+            nn.Linear(np.prod(envs.single_observation_space.shape), 64),
+            nn.ReLU(),
+            nn.Linear(64, 64),
+            nn.ReLU(),
+            nn.Linear(64, envs.single_action_space.n)
         )
 
     def get_value(self, x):
@@ -145,7 +145,7 @@ if __name__ == "__main__":
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
     agent = Agent(envs).to(device)
-    optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+    optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate)
 
     # ALGO Logic: Storage setup
     obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device) ## s_t
@@ -164,10 +164,10 @@ if __name__ == "__main__":
 
     for iteration in range(1, args.num_iterations + 1):
         # Annealing the rate if instructed to do so.
-        if args.anneal_lr:
-            frac = 1.0 - (iteration - 1.0) / args.num_iterations
-            lrnow = frac * args.learning_rate
-            optimizer.param_groups[0]["lr"] = lrnow
+        # if args.anneal_lr:
+        #     frac = 1.0 - (iteration - 1.0) / args.num_iterations
+        #     lrnow = frac * args.learning_rate
+        #     optimizer.param_groups[0]["lr"] = lrnow
 
         for step in range(0, args.num_steps):
             global_step += args.num_envs
@@ -194,7 +194,7 @@ if __name__ == "__main__":
 
         # bootstrap value if not done
         with torch.no_grad():
-            next_value = agent.get_value(next_obs).reshape(1, -1)
+            next_value = agent.get_value(next_obs).reshape(-1)
             advantages = torch.zeros_like(rewards).to(device)
             for t in reversed(range(args.num_steps)):
                 if t == args.num_steps - 1:
@@ -203,8 +203,11 @@ if __name__ == "__main__":
                 else:
                     nextnonterminal = 1.0 - dones[t + 1]
                     nextvalues = values[t + 1]
-                delta = rewards[t] + args.gamma * nextvalues * nextnonterminal - values[t] ## TD-error: delta_t = gammar * V_(t+1) + r_t - V_t
-                advantages[t] = delta + args.gamma * args.gae_lambda * nextnonterminal * (advantages[t + 1] if t + 1 <= args.num_steps - 1 else 0) ## A_t = delta_t + lambda * gamma * A_(t+1)
+                delta = rewards[t] + nextnonterminal * args.gamma * next_value - values[t]
+                if t == args.num_steps - 1:
+                    advantages[t] = delta
+                else:
+                    advantages[t] = delta + (1 - dones[t+1]) * args.gamma * args.gae_lambda * advantages[t+1]
             returns = advantages + values
 
         # flatten the batch
@@ -232,27 +235,27 @@ if __name__ == "__main__":
                     mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
 
                 # Policy loss
-                pg_loss1 = -mb_advantages * ratio
-                pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
-                pg_loss = torch.max(pg_loss1, pg_loss2).mean()
+                pg_loss1 = mb_advantages * ratio
+                pg_loss2 = mb_advantages * torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
+                pg_loss = -torch.min(pg_loss1, pg_loss2).mean()
 
                 # Value loss
                 newvalue = newvalue.view(-1)
-                if args.clip_vloss:
-                    v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
-                    v_clipped = b_values[mb_inds] + torch.clamp(
-                        newvalue - b_values[mb_inds],
-                        -args.clip_coef,
-                        args.clip_coef,
-                    )
-                    v_loss_clipped = (v_clipped - b_returns[mb_inds]) ** 2
-                    v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
-                    v_loss = 0.5 * v_loss_max.mean()
-                else:
-                    v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
+                # if args.clip_vloss:
+                #     v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
+                #     v_clipped = b_values[mb_inds] + torch.clamp(
+                #         newvalue - b_values[mb_inds],
+                #         -args.clip_coef,
+                #         args.clip_coef,
+                #     )
+                #     v_loss_clipped = (v_clipped - b_returns[mb_inds]) ** 2
+                #     v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
+                #     v_loss = v_loss_max.mean()
+                # else:
+                v_loss = ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
                 entropy_loss = entropy.mean()
-                loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
+                loss = pg_loss - args.ent_coef * entropy_loss + v_loss
 
                 optimizer.zero_grad()
                 loss.backward()
